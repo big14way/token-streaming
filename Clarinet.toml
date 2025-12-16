@@ -1,0 +1,31 @@
+[project]
+name = "token-streaming"
+description = "Continuous token streaming protocol for salaries, subscriptions, and vesting using Clarity 4"
+authors = ["Builder"]
+telemetry = false
+cache_dir = "./.cache"
+requirements = []
+
+[contracts.stream-manager]
+path = "contracts/stream-manager.clar"
+clarity_version = 4
+epoch = 3.3
+
+[contracts.stream-factory]
+path = "contracts/stream-factory.clar"
+clarity_version = 4
+epoch = 3.3
+
+[contracts.stream-token]
+path = "contracts/stream-token.clar"
+clarity_version = 4
+epoch = 3.3
+
+[repl.analysis]
+passes = ["check_checker"]
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false

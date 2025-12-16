@@ -1,0 +1,20 @@
+{
+  "name": "token-streaming-chainhooks",
+  "version": "1.0.0",
+  "description": "Chainhooks integration for Token Streaming Protocol",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": ["stacks", "chainhooks", "streaming", "payment"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hirosystems/chainhook-client": "^1.9.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
