@@ -497,3 +497,4 @@
     )
 )
 (define-data-var stream-metric-1 uint u1)
+(define-data-var stream-metric-2 uint u2)
