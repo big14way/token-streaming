@@ -496,3 +496,4 @@
         (stx-transfer? amount (var-get contract-principal) CONTRACT_OWNER)
     )
 )
+(define-data-var stream-metric-1 uint u1)
