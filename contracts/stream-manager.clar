@@ -15,6 +15,7 @@
 (define-constant ERR_STREAM_NOT_STARTED (err u15006))
 (define-constant ERR_STREAM_CANCELLED (err u15007))
 (define-constant ERR_INSUFFICIENT_BALANCE (err u15008))
+(define-constant ERR_STREAM_PAUSED (err u15009))
 
 ;; Stream status
 (define-constant STATUS_ACTIVE u0)
@@ -50,7 +51,10 @@
         rate-per-second: uint,
         status: uint,
         created-at: uint,
-        token-contract: (optional principal)
+        token-contract: (optional principal),
+        paused: bool,
+        paused-at: (optional uint),
+        total-paused-duration: uint
     }
 )
 
@@ -280,7 +284,10 @@
             rate-per-second: rate-per-second,
             status: STATUS_ACTIVE,
             created-at: current-time,
-            token-contract: none
+            token-contract: none,
+            paused: false,
+            paused-at: none,
+            total-paused-duration: u0
         })
 
         ;; Update sender streams list
@@ -376,6 +383,33 @@
 )
 
 ;; Cancel stream (sender only) - returns unstreamed portion
+(define-public (pause-stream (stream-id uint))
+    (let ((stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND)))
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get paused stream)) ERR_STREAM_PAUSED)
+        (asserts! (is-eq (get status stream) STATUS_ACTIVE) ERR_STREAM_CANCELLED)
+        (map-set streams stream-id (merge stream {
+            paused: true,
+            paused-at: (some stacks-block-time)
+        }))
+        (print { event: "stream-paused", stream-id: stream-id, timestamp: stacks-block-time })
+        (ok true)))
+
+(define-public (unpause-stream (stream-id uint))
+    (let ((stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+          (paused-duration (match (get paused-at stream)
+              pause-time (- stacks-block-time pause-time)
+              u0)))
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (get paused stream) ERR_NOT_AUTHORIZED)
+        (map-set streams stream-id (merge stream {
+            paused: false,
+            paused-at: none,
+            total-paused-duration: (+ (get total-paused-duration stream) paused-duration)
+        }))
+        (print { event: "stream-unpaused", stream-id: stream-id, paused-duration: paused-duration, timestamp: stacks-block-time })
+        (ok true)))
+
 (define-public (cancel-stream (stream-id uint))
     (let
         (
@@ -496,8 +530,3 @@
         (stx-transfer? amount (var-get contract-principal) CONTRACT_OWNER)
     )
 )
-(define-data-var stream-metric-1 uint u1)
-(define-data-var stream-metric-2 uint u2)
-(define-data-var stream-metric-3 uint u3)
-(define-data-var stream-metric-4 uint u4)
-(define-data-var stream-metric-5 uint u5)
