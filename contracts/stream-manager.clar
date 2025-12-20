@@ -16,6 +16,10 @@
 (define-constant ERR_STREAM_CANCELLED (err u15007))
 (define-constant ERR_INSUFFICIENT_BALANCE (err u15008))
 (define-constant ERR_STREAM_PAUSED (err u15009))
+(define-constant ERR_MILESTONE_NOT_FOUND (err u15010))
+(define-constant ERR_MILESTONE_CLAIMED (err u15011))
+(define-constant ERR_MILESTONE_NOT_REACHED (err u15012))
+(define-constant ERR_INVALID_MILESTONE (err u15013))
 
 ;; Stream status
 (define-constant STATUS_ACTIVE u0)
@@ -68,6 +72,23 @@
 (define-map recipient-streams
     principal
     (list 50 uint)
+)
+
+;; Milestone bonuses
+(define-map milestones
+    { stream-id: uint, milestone-percentage: uint }
+    {
+        bonus-amount: uint,
+        claimed: bool,
+        added-at: uint,
+        claimed-at: (optional uint)
+    }
+)
+
+;; Track milestones per stream
+(define-map stream-milestones
+    uint
+    (list 10 uint)
 )
 
 ;; ========================================
@@ -217,6 +238,32 @@
 ;; Calculate protocol fee
 (define-read-only (calculate-fee (amount uint))
     (/ (* amount PROTOCOL_FEE_BPS) u10000)
+)
+
+;; Get milestone details
+(define-read-only (get-milestone (stream-id uint) (milestone-percentage uint))
+    (map-get? milestones { stream-id: stream-id, milestone-percentage: milestone-percentage })
+)
+
+;; Get all milestones for a stream
+(define-read-only (get-stream-milestones (stream-id uint))
+    (default-to (list) (map-get? stream-milestones stream-id))
+)
+
+;; Check if milestone is claimable
+(define-read-only (is-milestone-claimable (stream-id uint) (milestone-percentage uint))
+    (match (get-milestone stream-id milestone-percentage)
+        milestone (let
+            (
+                (progress (get-stream-progress stream-id))
+            )
+            (and
+                (not (get claimed milestone))
+                (>= progress milestone-percentage)
+            )
+        )
+        false
+    )
 )
 
 ;; Get protocol stats
@@ -528,5 +575,147 @@
     (begin
         (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
         (stx-transfer? amount (var-get contract-principal) CONTRACT_OWNER)
+    )
+)
+
+;; ========================================
+;; Milestone Bonus Functions
+;; ========================================
+
+;; Add milestone bonus to stream (sender only)
+(define-public (add-milestone (stream-id uint) (milestone-percentage uint) (bonus-amount uint))
+    (let (
+        (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+        (existing-milestones (get-stream-milestones stream-id))
+        (current-time stacks-block-time)
+        )
+        ;; Validations
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (is-eq (get status stream) STATUS_ACTIVE) ERR_STREAM_CANCELLED)
+        (asserts! (> bonus-amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (and (> milestone-percentage u0) (<= milestone-percentage u100)) ERR_INVALID_MILESTONE)
+        (asserts! (is-none (get-milestone stream-id milestone-percentage)) ERR_MILESTONE_CLAIMED)
+
+        ;; Transfer bonus to contract
+        (try! (stx-transfer? bonus-amount tx-sender (var-get contract-principal)))
+
+        ;; Create milestone
+        (map-set milestones
+            { stream-id: stream-id, milestone-percentage: milestone-percentage }
+            {
+                bonus-amount: bonus-amount,
+                claimed: false,
+                added-at: current-time,
+                claimed-at: none
+            }
+        )
+
+        ;; Add to milestone list
+        (map-set stream-milestones stream-id
+            (unwrap! (as-max-len? (append existing-milestones milestone-percentage) u10) ERR_INVALID_MILESTONE)
+        )
+
+        (print {
+            event: "milestone-added",
+            stream-id: stream-id,
+            milestone-percentage: milestone-percentage,
+            bonus-amount: bonus-amount,
+            sender: tx-sender,
+            timestamp: current-time
+        })
+
+        (ok true)
+    )
+)
+
+;; Claim milestone bonus (recipient only)
+(define-public (claim-milestone (stream-id uint) (milestone-percentage uint))
+    (let (
+        (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+        (milestone (unwrap! (get-milestone stream-id milestone-percentage) ERR_MILESTONE_NOT_FOUND))
+        (progress (get-stream-progress stream-id))
+        (current-time stacks-block-time)
+        )
+        ;; Validations
+        (asserts! (is-eq tx-sender (get recipient stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get claimed milestone)) ERR_MILESTONE_CLAIMED)
+        (asserts! (>= progress milestone-percentage) ERR_MILESTONE_NOT_REACHED)
+
+        ;; Mark as claimed
+        (map-set milestones
+            { stream-id: stream-id, milestone-percentage: milestone-percentage }
+            (merge milestone {
+                claimed: true,
+                claimed-at: (some current-time)
+            })
+        )
+
+        ;; Transfer bonus to recipient
+        (try! (stx-transfer? (get bonus-amount milestone) (var-get contract-principal) tx-sender))
+
+        (print {
+            event: "milestone-claimed",
+            stream-id: stream-id,
+            milestone-percentage: milestone-percentage,
+            bonus-amount: (get bonus-amount milestone),
+            recipient: tx-sender,
+            stream-progress: progress,
+            timestamp: current-time
+        })
+
+        (ok (get bonus-amount milestone))
+    )
+)
+
+;; Claim all available milestones (recipient only)
+(define-public (claim-all-milestones (stream-id uint))
+    (let (
+        (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+        (milestone-percentages (get-stream-milestones stream-id))
+        )
+        ;; Validations
+        (asserts! (is-eq tx-sender (get recipient stream)) ERR_NOT_AUTHORIZED)
+
+        ;; Claim all claimable milestones
+        (ok (fold claim-single-milestone milestone-percentages u0))
+    )
+)
+
+;; Helper to claim single milestone in fold
+(define-private (claim-single-milestone (milestone-percentage uint) (total-claimed uint))
+    (match (claim-milestone (var-get stream-counter) milestone-percentage)
+        success (+ total-claimed success)
+        error total-claimed
+    )
+)
+
+;; Remove unclaimed milestone (sender only, before it's claimable)
+(define-public (remove-milestone (stream-id uint) (milestone-percentage uint))
+    (let (
+        (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+        (milestone (unwrap! (get-milestone stream-id milestone-percentage) ERR_MILESTONE_NOT_FOUND))
+        (progress (get-stream-progress stream-id))
+        )
+        ;; Validations
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get claimed milestone)) ERR_MILESTONE_CLAIMED)
+        (asserts! (< progress milestone-percentage) ERR_MILESTONE_NOT_REACHED)
+
+        ;; Delete milestone
+        (map-delete milestones { stream-id: stream-id, milestone-percentage: milestone-percentage })
+
+        ;; Refund bonus to sender
+        (try! (stx-transfer? (get bonus-amount milestone) (var-get contract-principal) tx-sender))
+
+        (print {
+            event: "milestone-removed",
+            stream-id: stream-id,
+            milestone-percentage: milestone-percentage,
+            bonus-amount: (get bonus-amount milestone),
+            sender: tx-sender,
+            timestamp: stacks-block-time
+        })
+
+        (ok (get bonus-amount milestone))
     )
 )
