@@ -20,6 +20,9 @@
 (define-constant ERR_MILESTONE_CLAIMED (err u15011))
 (define-constant ERR_MILESTONE_NOT_REACHED (err u15012))
 (define-constant ERR_INVALID_MILESTONE (err u15013))
+(define-constant ERR_DELEGATION_EXISTS (err u15014))
+(define-constant ERR_DELEGATION_NOT_FOUND (err u15015))
+(define-constant ERR_DELEGATION_EXPIRED (err u15016))
 
 ;; Stream status
 (define-constant STATUS_ACTIVE u0)
@@ -89,6 +92,23 @@
 (define-map stream-milestones
     uint
     (list 10 uint)
+)
+
+;; ========================================
+;; Stream Delegation Data Structures
+;; ========================================
+
+;; Delegations for stream withdrawals
+(define-map stream-delegations
+    { stream-id: uint }
+    {
+        delegate: principal,
+        delegated-at: uint,
+        expires-at: uint,
+        withdrawal-limit: uint,
+        total-withdrawn: uint,
+        active: bool
+    }
 )
 
 ;; ========================================
@@ -717,5 +737,114 @@
         })
 
         (ok (get bonus-amount milestone))
+    )
+)
+
+;; ========================================
+;; Stream Delegation Functions
+;; ========================================
+
+;; Delegate stream to another address
+(define-public (delegate-stream (stream-id uint) (delegate principal) (duration uint) (withdrawal-limit uint))
+    (let
+        (
+            (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+            (current-time stacks-block-time)
+        )
+        (asserts! (is-eq tx-sender (get recipient stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (is-none (map-get? stream-delegations { stream-id: stream-id })) ERR_DELEGATION_EXISTS)
+        (asserts! (> duration u0) ERR_INVALID_TIMES)
+
+        (map-set stream-delegations
+            { stream-id: stream-id }
+            {
+                delegate: delegate,
+                delegated-at: current-time,
+                expires-at: (+ current-time duration),
+                withdrawal-limit: withdrawal-limit,
+                total-withdrawn: u0,
+                active: true
+            }
+        )
+
+        (print {
+            event: "stream-delegated",
+            stream-id: stream-id,
+            delegate: delegate,
+            duration: duration,
+            withdrawal-limit: withdrawal-limit,
+            expires-at: (+ current-time duration),
+            timestamp: current-time
+        })
+
+        (ok true)
+    )
+)
+
+;; Revoke delegation
+(define-public (revoke-delegation (stream-id uint))
+    (let
+        (
+            (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+            (delegation (unwrap! (map-get? stream-delegations { stream-id: stream-id }) ERR_DELEGATION_NOT_FOUND))
+        )
+        (asserts! (is-eq tx-sender (get recipient stream)) ERR_NOT_AUTHORIZED)
+
+        (map-set stream-delegations
+            { stream-id: stream-id }
+            (merge delegation { active: false })
+        )
+
+        (print {
+            event: "delegation-revoked",
+            stream-id: stream-id,
+            delegate: (get delegate delegation),
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
+    )
+)
+
+;; Delegated withdrawal
+(define-public (delegated-withdraw (stream-id uint) (amount uint))
+    (let
+        (
+            (stream (unwrap! (map-get? streams stream-id) ERR_STREAM_NOT_FOUND))
+            (delegation (unwrap! (map-get? stream-delegations { stream-id: stream-id }) ERR_DELEGATION_NOT_FOUND))
+            (current-time stacks-block-time)
+            (available (get-withdrawable-amount stream-id))
+        )
+        (asserts! (is-eq tx-sender (get delegate delegation)) ERR_NOT_AUTHORIZED)
+        (asserts! (get active delegation) ERR_DELEGATION_NOT_FOUND)
+        (asserts! (< current-time (get expires-at delegation)) ERR_DELEGATION_EXPIRED)
+        (asserts! (<= (+ (get total-withdrawn delegation) amount) (get withdrawal-limit delegation)) ERR_INVALID_AMOUNT)
+        (asserts! (<= amount available) ERR_INSUFFICIENT_BALANCE)
+
+        ;; Update delegation
+        (map-set stream-delegations
+            { stream-id: stream-id }
+            (merge delegation { total-withdrawn: (+ (get total-withdrawn delegation) amount) })
+        )
+
+        ;; Update stream withdrawn
+        (map-set streams
+            stream-id
+            (merge stream { withdrawn-amount: (+ (get withdrawn-amount stream) amount) })
+        )
+
+        ;; Transfer to delegate
+        (try! (stx-transfer? amount (var-get contract-principal) tx-sender))
+
+        (print {
+            event: "delegated-withdrawal",
+            stream-id: stream-id,
+            delegate: tx-sender,
+            amount: amount,
+            total-withdrawn-by-delegate: (+ (get total-withdrawn delegation) amount),
+            timestamp: current-time
+        })
+
+        (ok amount)
     )
 )
