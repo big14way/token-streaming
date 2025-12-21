@@ -23,6 +23,9 @@
 (define-constant ERR_DELEGATION_EXISTS (err u15014))
 (define-constant ERR_DELEGATION_NOT_FOUND (err u15015))
 (define-constant ERR_DELEGATION_EXPIRED (err u15016))
+(define-constant ERR_SPLIT_NOT_FOUND (err u15017))
+(define-constant ERR_INVALID_SPLIT (err u15018))
+(define-constant ERR_SPLIT_EXISTS (err u15019))
 
 ;; Stream status
 (define-constant STATUS_ACTIVE u0)
@@ -108,6 +111,25 @@
         withdrawal-limit: uint,
         total-withdrawn: uint,
         active: bool
+    }
+)
+
+;; Stream Splitting System
+(define-map stream-splits
+    { stream-id: uint }
+    {
+        recipients: (list 10 principal),
+        percentages: (list 10 uint),  ;; In basis points (10000 = 100%)
+        active: bool,
+        created-at: uint
+    }
+)
+
+(define-map split-withdrawals
+    { stream-id: uint, recipient: principal }
+    {
+        total-withdrawn: uint,
+        last-withdrawal: uint
     }
 )
 
@@ -848,3 +870,33 @@
         (ok amount)
     )
 )
+
+;; Create stream split
+(define-public (create-stream-split (stream-id uint) (recipients (list 10 principal)) (percentages (list 10 uint)))
+    (let ((stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+          (total-pct (fold + percentages u0)))
+        (asserts! (is-eq (get sender stream) tx-sender) ERR_NOT_AUTHORIZED)
+        (asserts! (is-none (map-get? stream-splits { stream-id: stream-id })) ERR_SPLIT_EXISTS)
+        (asserts! (is-eq total-pct u10000) ERR_INVALID_SPLIT)
+        (map-set stream-splits { stream-id: stream-id }
+            { recipients: recipients, percentages: percentages, active: true, created-at: stacks-block-time })
+        (print { event: "stream-split-created", stream-id: stream-id, recipients: recipients, percentages: percentages })
+        (ok true)))
+
+;; Withdraw from split stream
+(define-public (withdraw-from-split (stream-id uint))
+    (let ((stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+          (split (unwrap! (map-get? stream-splits { stream-id: stream-id }) ERR_SPLIT_NOT_FOUND))
+          (available (get-withdrawable-amount stream-id))
+          (recipient-idx (unwrap! (index-of (get recipients split) tx-sender) ERR_NOT_AUTHORIZED))
+          (pct (unwrap! (element-at (get percentages split) recipient-idx) ERR_INVALID_SPLIT))
+          (amount (/ (* available pct) u10000)))
+        (asserts! (get active split) ERR_SPLIT_NOT_FOUND)
+        (asserts! (> amount u0) ERR_INSUFFICIENT_BALANCE)
+        (try! (stx-transfer? amount (var-get contract-principal) tx-sender))
+        (map-set streams stream-id (merge stream { withdrawn-amount: (+ (get withdrawn-amount stream) amount) }))
+        (map-set split-withdrawals { stream-id: stream-id, recipient: tx-sender }
+            { total-withdrawn: (+ (default-to u0 (get total-withdrawn (map-get? split-withdrawals { stream-id: stream-id, recipient: tx-sender }))) amount),
+              last-withdrawal: stacks-block-time })
+        (print { event: "split-withdrawal", stream-id: stream-id, recipient: tx-sender, amount: amount })
+        (ok amount)))
