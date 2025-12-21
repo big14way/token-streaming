@@ -26,6 +26,12 @@
 (define-constant ERR_SPLIT_NOT_FOUND (err u15017))
 (define-constant ERR_INVALID_SPLIT (err u15018))
 (define-constant ERR_SPLIT_EXISTS (err u15019))
+(define-constant ERR_ESCROW_NOT_FOUND (err u15020))
+(define-constant ERR_ESCROW_EXISTS (err u15021))
+(define-constant ERR_ESCROW_LOCKED (err u15022))
+(define-constant ERR_CONDITION_NOT_MET (err u15023))
+(define-constant ERR_INVALID_ORACLE (err u15024))
+(define-constant ERR_ESCROW_RELEASED (err u15025))
 
 ;; Stream status
 (define-constant STATUS_ACTIVE u0)
@@ -130,6 +136,55 @@
     {
         total-withdrawn: uint,
         last-withdrawal: uint
+    }
+)
+
+;; ========================================
+;; Stream Escrow and Conditional Release
+;; ========================================
+
+(define-data-var escrow-counter uint u0)
+
+;; Escrow conditions
+(define-constant CONDITION_TIME_BASED u0)
+(define-constant CONDITION_MILESTONE_BASED u1)
+(define-constant CONDITION_ORACLE_BASED u2)
+
+;; Stream escrows
+(define-map stream-escrows
+    { stream-id: uint }
+    {
+        escrow-amount: uint,
+        locked-until: uint,
+        condition-type: uint,
+        condition-met: bool,
+        oracle-address: (optional principal),
+        oracle-verified: bool,
+        release-approved: bool,
+        created-at: uint,
+        released-at: uint
+    }
+)
+
+;; Milestone conditions for escrow
+(define-map escrow-milestones
+    { stream-id: uint, milestone-id: uint }
+    {
+        description: (string-ascii 256),
+        target-date: uint,
+        verified: bool,
+        verified-by: principal,
+        verified-at: uint
+    }
+)
+
+;; Oracle approvals for escrow release
+(define-map oracle-approvals
+    { stream-id: uint, oracle: principal }
+    {
+        approved: bool,
+        approval-data: (optional (buff 32)),
+        approved-at: uint
     }
 )
 
@@ -327,6 +382,59 @@
 ;; Get recipient's streams
 (define-read-only (get-recipient-streams (recipient principal))
     (default-to (list) (map-get? recipient-streams recipient))
+)
+
+;; ========================================
+;; Escrow Read-Only Functions
+;; ========================================
+
+(define-read-only (get-stream-escrow (stream-id uint))
+    (map-get? stream-escrows { stream-id: stream-id })
+)
+
+(define-read-only (get-escrow-milestone (stream-id uint) (milestone-id uint))
+    (map-get? escrow-milestones { stream-id: stream-id, milestone-id: milestone-id })
+)
+
+(define-read-only (get-oracle-approval (stream-id uint) (oracle principal))
+    (map-get? oracle-approvals { stream-id: stream-id, oracle: oracle })
+)
+
+(define-read-only (is-escrow-releasable (stream-id uint))
+    (match (get-stream-escrow stream-id)
+        escrow (let
+            (
+                (condition-type (get condition-type escrow))
+                (current-time stacks-block-time)
+            )
+            (if (get release-approved escrow)
+                true
+                (if (is-eq condition-type CONDITION_TIME_BASED)
+                    (>= current-time (get locked-until escrow))
+                    (get condition-met escrow))))
+        false)
+)
+
+(define-read-only (get-escrow-status (stream-id uint))
+    (match (get-stream-escrow stream-id)
+        escrow {
+            escrow-amount: (get escrow-amount escrow),
+            locked-until: (get locked-until escrow),
+            condition-type: (get condition-type escrow),
+            condition-met: (get condition-met escrow),
+            release-approved: (get release-approved escrow),
+            is-releasable: (is-escrow-releasable stream-id),
+            released-at: (get released-at escrow)
+        }
+        {
+            escrow-amount: u0,
+            locked-until: u0,
+            condition-type: u0,
+            condition-met: false,
+            release-approved: false,
+            is-releasable: false,
+            released-at: u0
+        })
 )
 
 ;; ========================================
@@ -900,3 +1008,246 @@
               last-withdrawal: stacks-block-time })
         (print { event: "split-withdrawal", stream-id: stream-id, recipient: tx-sender, amount: amount })
         (ok amount)))
+
+;; ========================================
+;; Stream Escrow Public Functions
+;; ========================================
+
+;; Create escrow for stream
+(define-public (create-stream-escrow (stream-id uint) (escrow-amount uint) (lock-duration uint) (condition-type uint) (oracle-address (optional principal)))
+    (let
+        (
+            (stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+            (current-time stacks-block-time)
+            (locked-until (+ current-time lock-duration))
+        )
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (is-none (get-stream-escrow stream-id)) ERR_ESCROW_EXISTS)
+        (asserts! (> escrow-amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= condition-type CONDITION_ORACLE_BASED) ERR_INVALID_ORACLE)
+        
+        ;; If oracle-based, verify oracle address is provided
+        (asserts! (if (is-eq condition-type CONDITION_ORACLE_BASED)
+            (is-some oracle-address)
+            true) ERR_INVALID_ORACLE)
+        
+        ;; Transfer escrow amount to contract
+        (try! (stx-transfer? escrow-amount tx-sender (var-get contract-principal)))
+        
+        ;; Create escrow
+        (map-set stream-escrows
+            { stream-id: stream-id }
+            {
+                escrow-amount: escrow-amount,
+                locked-until: locked-until,
+                condition-type: condition-type,
+                condition-met: false,
+                oracle-address: oracle-address,
+                oracle-verified: false,
+                release-approved: false,
+                created-at: current-time,
+                released-at: u0
+            }
+        )
+        
+        (var-set escrow-counter (+ (var-get escrow-counter) u1))
+        
+        (print {
+            event: "escrow-created",
+            stream-id: stream-id,
+            escrow-amount: escrow-amount,
+            locked-until: locked-until,
+            condition-type: condition-type,
+            oracle-address: oracle-address,
+            timestamp: current-time
+        })
+        
+        (ok true)
+    )
+)
+
+;; Add milestone condition for escrow
+(define-public (add-escrow-milestone (stream-id uint) (milestone-id uint) (description (string-ascii 256)) (target-date uint))
+    (let
+        (
+            (escrow (unwrap! (get-stream-escrow stream-id) ERR_ESCROW_NOT_FOUND))
+            (stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+        )
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (is-eq (get condition-type escrow) CONDITION_MILESTONE_BASED) ERR_CONDITION_NOT_MET)
+        (asserts! (> target-date stacks-block-time) ERR_INVALID_TIMES)
+        
+        (map-set escrow-milestones
+            { stream-id: stream-id, milestone-id: milestone-id }
+            {
+                description: description,
+                target-date: target-date,
+                verified: false,
+                verified-by: tx-sender,
+                verified-at: u0
+            }
+        )
+        
+        (print {
+            event: "escrow-milestone-added",
+            stream-id: stream-id,
+            milestone-id: milestone-id,
+            description: description,
+            target-date: target-date,
+            timestamp: stacks-block-time
+        })
+        
+        (ok true)
+    )
+)
+
+;; Verify milestone completion (sender or admin)
+(define-public (verify-escrow-milestone (stream-id uint) (milestone-id uint))
+    (let
+        (
+            (escrow (unwrap! (get-stream-escrow stream-id) ERR_ESCROW_NOT_FOUND))
+            (stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+            (milestone (unwrap! (get-escrow-milestone stream-id milestone-id) ERR_MILESTONE_NOT_FOUND))
+        )
+        (asserts! (or (is-eq tx-sender (get sender stream)) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get verified milestone)) ERR_MILESTONE_CLAIMED)
+        
+        (map-set escrow-milestones
+            { stream-id: stream-id, milestone-id: milestone-id }
+            (merge milestone {
+                verified: true,
+                verified-by: tx-sender,
+                verified-at: stacks-block-time
+            })
+        )
+        
+        ;; Mark condition as met
+        (map-set stream-escrows
+            { stream-id: stream-id }
+            (merge escrow { condition-met: true })
+        )
+        
+        (print {
+            event: "escrow-milestone-verified",
+            stream-id: stream-id,
+            milestone-id: milestone-id,
+            verified-by: tx-sender,
+            timestamp: stacks-block-time
+        })
+        
+        (ok true)
+    )
+)
+
+;; Oracle approval for escrow release
+(define-public (approve-escrow-release (stream-id uint) (approval-data (optional (buff 32))))
+    (let
+        (
+            (escrow (unwrap! (get-stream-escrow stream-id) ERR_ESCROW_NOT_FOUND))
+        )
+        (asserts! (is-eq (get condition-type escrow) CONDITION_ORACLE_BASED) ERR_INVALID_ORACLE)
+        (asserts! (is-eq (some tx-sender) (get oracle-address escrow)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get oracle-verified escrow)) ERR_ESCROW_RELEASED)
+        
+        (map-set oracle-approvals
+            { stream-id: stream-id, oracle: tx-sender }
+            {
+                approved: true,
+                approval-data: approval-data,
+                approved-at: stacks-block-time
+            }
+        )
+        
+        ;; Mark escrow as oracle-verified and condition met
+        (map-set stream-escrows
+            { stream-id: stream-id }
+            (merge escrow {
+                oracle-verified: true,
+                condition-met: true
+            })
+        )
+        
+        (print {
+            event: "escrow-oracle-approved",
+            stream-id: stream-id,
+            oracle: tx-sender,
+            approval-data: approval-data,
+            timestamp: stacks-block-time
+        })
+        
+        (ok true)
+    )
+)
+
+;; Release escrow funds to stream recipient
+(define-public (release-escrow (stream-id uint))
+    (let
+        (
+            (escrow (unwrap! (get-stream-escrow stream-id) ERR_ESCROW_NOT_FOUND))
+            (stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+            (recipient (get recipient stream))
+            (escrow-amount (get escrow-amount escrow))
+        )
+        (asserts! (is-escrow-releasable stream-id) ERR_ESCROW_LOCKED)
+        (asserts! (is-eq (get released-at escrow) u0) ERR_ESCROW_RELEASED)
+        
+        ;; Transfer escrow to recipient
+        (try! (stx-transfer? escrow-amount (var-get contract-principal) recipient))
+        
+        ;; Mark as released
+        (map-set stream-escrows
+            { stream-id: stream-id }
+            (merge escrow {
+                release-approved: true,
+                released-at: stacks-block-time
+            })
+        )
+        
+        (print {
+            event: "escrow-released",
+            stream-id: stream-id,
+            recipient: recipient,
+            escrow-amount: escrow-amount,
+            timestamp: stacks-block-time
+        })
+        
+        (ok escrow-amount)
+    )
+)
+
+;; Cancel escrow (sender only, before conditions are met)
+(define-public (cancel-escrow (stream-id uint))
+    (let
+        (
+            (escrow (unwrap! (get-stream-escrow stream-id) ERR_ESCROW_NOT_FOUND))
+            (stream (unwrap! (get-stream stream-id) ERR_STREAM_NOT_FOUND))
+            (refund-amount (get escrow-amount escrow))
+        )
+        (asserts! (is-eq tx-sender (get sender stream)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get condition-met escrow)) ERR_CONDITION_NOT_MET)
+        (asserts! (is-eq (get released-at escrow) u0) ERR_ESCROW_RELEASED)
+        
+        ;; Refund escrow to sender
+        (try! (stx-transfer? refund-amount (var-get contract-principal) tx-sender))
+        
+        ;; Mark as released (cancelled)
+        (map-set stream-escrows
+            { stream-id: stream-id }
+            (merge escrow {
+                release-approved: true,
+                released-at: stacks-block-time
+            })
+        )
+        
+        (print {
+            event: "escrow-cancelled",
+            stream-id: stream-id,
+            sender: tx-sender,
+            refund-amount: refund-amount,
+            timestamp: stacks-block-time
+        })
+        
+        (ok refund-amount)
+    )
+)
+
