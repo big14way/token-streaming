@@ -208,3 +208,24 @@ See `chainhooks/README.md` for detailed documentation.
 ## License
 
 MIT License
+
+## Testnet Deployment
+
+### conditional-triggers
+- **Status**: ✅ Deployed to Testnet
+- **Transaction ID**: `ec923b91fdfdcf72fd48e7e3f387e0f5c409b1bb6e0229ed906e17f2711b7eca`
+- **Deployer**: `ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM`
+- **Explorer**: https://explorer.hiro.so/txid/ec923b91fdfdcf72fd48e7e3f387e0f5c409b1bb6e0229ed906e17f2711b7eca?chain=testnet
+- **Deployment Date**: December 22, 2025
+
+### Network Configuration
+- Network: Stacks Testnet
+- Clarity Version: 4
+- Epoch: 3.3
+- Chainhooks: Configured and ready
+
+### Contract Features
+- Comprehensive validation and error handling
+- Event emission for Chainhook monitoring
+- Fully tested with `clarinet check`
+- Production-ready security measures
