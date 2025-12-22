@@ -1,0 +1,24 @@
+{
+  "chain": "stacks",
+  "uuid": "conditional-triggers-v1",
+  "name": "Conditional Triggers Events",
+  "version": 1,
+  "networks": {
+    "testnet": {
+      "start_block": 1,
+      "if_this": {
+        "scope": "print_event",
+        "contract_identifier": "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.conditional-triggers",
+        "contains": "event"
+      },
+      "then_that": {
+        "http_post": {
+          "url": "http://localhost:3000/api/events/conditional-triggers",
+          "authorization_header": "Bearer STREAM_API_KEY"
+        }
+      }
+    }
+  },
+  "decode_clarity_values": true,
+  "enabled": true
+}

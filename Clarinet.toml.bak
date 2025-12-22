@@ -21,11 +21,6 @@ path = "contracts/stream-token.clar"
 clarity_version = 4
 epoch = 3.3
 
-[contracts.conditional-triggers]
-path = "contracts/conditional-triggers.clar"
-clarity_version = 4
-epoch = 3.3
-
 [repl.analysis]
 passes = ["check_checker"]
 
