@@ -9,23 +9,30 @@ plan:
     - id: 0
       transactions:
         - contract-publish:
+            contract-name: conditional-triggers
+            expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            cost: 12115073
+            path: contracts/conditional-triggers.clar
+            anchor-block-only: true
+            clarity-version: 4
+        - contract-publish:
             contract-name: stream-factory
             expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            cost: 1961249
+            cost: 12158739
             path: contracts/stream-factory.clar
             anchor-block-only: true
             clarity-version: 4
         - contract-publish:
             contract-name: stream-manager
             expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            cost: 1976393
+            cost: 12532081
             path: contracts/stream-manager.clar
             anchor-block-only: true
             clarity-version: 4
         - contract-publish:
             contract-name: stream-token
             expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            cost: 1952093
+            cost: 12101973
             path: contracts/stream-token.clar
             anchor-block-only: true
             clarity-version: 4
